@@ -43,6 +43,18 @@ import com.evolveum.midpoint.xml.ns._public.common.common_3.*;
 import com.evolveum.prism.xml.ns._public.types_3.ProtectedStringType;
 import com.evolveum.prism.xml.ns._public.types_3.RawType;
 
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizeRequest;
+import org.springframework.security.oauth2.client.registration.ClientRegistration;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.registration.InMemoryClientRegistrationRepository;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.AuthorizedClientServiceOAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.OAuth2AccessToken;
+import org.springframework.security.oauth2.client.InMemoryOAuth2AuthorizedClientService;
+
 /**
  * Message transport sending mail messages.
  */
@@ -195,11 +207,11 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
 
                 try (jakarta.mail.Transport t = session.getTransport("smtp")) {
                     if (isBasicAuth) {
-                        if (!sendViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage))
+                        if (!sendViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage)) {
                             continue;
+                        }
                     } else {
-                        if (!sendViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage))
-                            continue;
+                        if (!sendViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage)) {continue;}
                     }
                     LOGGER.debug("Message sent successfully to " + actualTo + " via server " + host + ".");
                     resultForServer.recordSuccess();
@@ -225,30 +237,65 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
     }
 
     private boolean sendViaOauth(Collection<String> actualTo, String host, MailAuthenticationType auth, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
-        String clientId = auth.getOauth2().getClientId();
-        String clientSecret;
+        // Build a dynamic ClientRegistration from the auth (OAuth2CredentialsType) for this request
+        ClientRegistration clientRegistration = ClientRegistration.withRegistrationId("mail-oauth2")
+                .clientId(auth.getOauth2().getClientId())
+                .clientSecret(auth.getOauth2().getClientSecret().getClearValue())
+                .tokenUri(auth.getOauth2().getTokenEndpoint())
+                .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                .build();
+        ClientRegistrationRepository repo = new InMemoryClientRegistrationRepository(clientRegistration);
+        OAuth2AuthorizedClientService service = new InMemoryOAuth2AuthorizedClientService(repo);
+        OAuth2AuthorizedClientManager manager = new AuthorizedClientServiceOAuth2AuthorizedClientManager(repo, service);
+        String registrationId = clientRegistration.getRegistrationId();
+        String userEmail;
         try {
-            clientSecret = transportSupport.protector().decryptString(auth.getOauth2().getClientSecret());
-        } catch (EncryptionException e) {
-        String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the client secret couldn't be obtained. Trying another mail server, if there is any.";
-        LoggingUtils.logException(LOGGER, msg, e);
-        resultForServer.recordFatalError(msg, e);
-        return false;
-    }
-        String tokenEndpoint = auth.getOauth2().getTokenEndpoint();
-
-        String accessToken = retrieveAccessToken(clientId, clientSecret, tokenEndpoint);
-
-        String userEmail = extractUserEmailFromMessage(mimeMessage);
-
-        t.connect(userEmail, generateXOAuth2Token(userEmail, accessToken));
+            userEmail = extractUserEmailFromMessage(mimeMessage);
+        } catch (Exception e) {
+            String msg = "Couldn't extract user email from message: " + e.getMessage();
+            LoggingUtils.logException(LOGGER, msg, e);
+            resultForServer.recordFatalError(msg, e);
+            return false;
+        }
+        String accessToken;
+        try {
+            accessToken = retrieveAccessToken(manager, registrationId, userEmail);
+        } catch (Exception e) {
+            String msg = "Couldn't retrieve access token for OAuth2: " + e.getMessage();
+            LoggingUtils.logException(LOGGER, msg, e);
+            resultForServer.recordFatalError(msg, e);
+            return false;
+        }
+        t.connect(host, userEmail, accessToken);
         t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
         t.close();
         return true;
     }
 
-    private String generateXOAuth2Token(String username, String accessToken) {
-        return "user=" + username + "\001auth=Bearer " + accessToken + "\001\001";
+    /**
+     * Retrieves an OAuth2 access token using a per-request OAuth2AuthorizedClientManager.
+     */
+    private String retrieveAccessToken(OAuth2AuthorizedClientManager manager, String registrationId, String principalName) {
+        OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId(registrationId)
+                .principal(principalName)
+                .build();
+        OAuth2AuthorizedClient authorizedClient = manager.authorize(authorizeRequest);
+        if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
+            throw new IllegalStateException("Failed to authorize client or retrieve access token for registrationId: " + registrationId);
+        }
+        OAuth2AccessToken token = authorizedClient.getAccessToken();
+        return token.getTokenValue();
+    }
+
+    /**
+     * Extracts the user email from the MimeMessage's From header.
+     */
+    private String extractUserEmailFromMessage(MimeMessage mimeMessage) throws MessagingException {
+        jakarta.mail.Address[] froms = mimeMessage.getFrom();
+        if (froms == null || froms.length == 0) {
+            throw new MessagingException("No From address in message");
+        }
+        return ((InternetAddress) froms[0]).getAddress();
     }
 
     private boolean sendViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
