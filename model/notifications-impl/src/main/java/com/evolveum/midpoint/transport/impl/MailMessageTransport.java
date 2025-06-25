@@ -67,7 +67,6 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
 
     @Override
     public void send(Message mailMessage, String transportName, SendingContext ctx, OperationResult parentResult) {
-
         OperationResult result = parentResult.createSubresult(DOT_CLASS + "send");
         result.addArbitraryObjectCollectionAsParam("mailMessage recipient(s)", mailMessage.getTo());
         result.addParam("mailMessage subject", mailMessage.getSubject());
@@ -77,16 +76,30 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             TransportUtil.logToFile(logToFile, formatToFileOld(mailMessage), LOGGER);
         }
         String redirectToFile = configuration.getRedirectToFile();
-        int optionsForFilteringRecipient = TransportUtil.optionsForFilteringRecipient(configuration);
+        if (redirectToFile != null && TransportUtil.optionsForFilteringRecipient(configuration) == 0) {
+            TransportUtil.appendToFile(redirectToFile, formatToFileOld(mailMessage), LOGGER, result);
+            return;
+        }
 
+        filterAndValidateRecipients(mailMessage, ctx, result);
+
+        if (checkRecipientsAndServers(mailMessage, result)) {
+            return;
+        }
+
+        sendViaMailServers(mailMessage, ctx, result);
+    }
+
+    private void filterAndValidateRecipients(Message mailMessage, SendingContext ctx, OperationResult result) {
+        int optionsForFilteringRecipient = TransportUtil.optionsForFilteringRecipient(configuration);
         List<String> allowedRecipientTo = new ArrayList<>();
         List<String> forbiddenRecipientTo = new ArrayList<>();
         List<String> allowedRecipientCc = new ArrayList<>();
         List<String> forbiddenRecipientCc = new ArrayList<>();
         List<String> allowedRecipientBcc = new ArrayList<>();
         List<String> forbiddenRecipientBcc = new ArrayList<>();
-
         var task = ctx.task();
+        String redirectToFile = configuration.getRedirectToFile();
         if (optionsForFilteringRecipient != 0) {
             TransportUtil.validateRecipient(allowedRecipientTo, forbiddenRecipientTo,
                     mailMessage.getTo(), configuration, task, result,
@@ -109,26 +122,23 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 mailMessage.setCc(allowedRecipientCc);
                 mailMessage.setBcc(allowedRecipientBcc);
             }
-
-        } else if (redirectToFile != null) {
-            TransportUtil.appendToFile(redirectToFile, formatToFileOld(mailMessage), LOGGER, result);
-            return;
         }
+    }
 
+    private boolean checkRecipientsAndServers(Message mailMessage, OperationResult result) {
+        int optionsForFilteringRecipient = TransportUtil.optionsForFilteringRecipient(configuration);
         if (optionsForFilteringRecipient != 0 && mailMessage.getTo().isEmpty()) {
             String msg = "No recipient found after recipient validation.";
             LOGGER.debug(msg);
             result.recordSuccess();
-            return;
+            return true;
         }
-
         if (configuration.getServer().isEmpty()) {
             String msg = "Mail server(s) are not defined, mail notification to " + mailMessage.getTo() + " will not be sent.";
             LOGGER.warn(msg);
             result.recordWarning(msg);
-            return;
+            return true;
         }
-
         Collection<String> actualTo = filterBlankMailRecipients(mailMessage.getTo(), "to", mailMessage.getSubject());
         Collection<String> actualCc = filterBlankMailRecipients(mailMessage.getCc(), "cc", mailMessage.getSubject());
         Collection<String> actualBcc = filterBlankMailRecipients(mailMessage.getBcc(), "bcc", mailMessage.getSubject());
@@ -136,15 +146,19 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             String msg = "No recipients found after excluding blank ones; the message will not be sent";
             LOGGER.warn(msg);
             result.recordWarning(msg);
-            return;
+            return true;
         }
+        return false;
+    }
 
+    private void sendViaMailServers(Message mailMessage, SendingContext ctx, OperationResult result) {
+        Collection<String> actualTo = filterBlankMailRecipients(mailMessage.getTo(), "to", mailMessage.getSubject());
+        Collection<String> actualCc = filterBlankMailRecipients(mailMessage.getCc(), "cc", mailMessage.getSubject());
+        Collection<String> actualBcc = filterBlankMailRecipients(mailMessage.getBcc(), "bcc", mailMessage.getSubject());
         long start = System.currentTimeMillis();
-
-        String defaultFrom = configuration.getDefaultFrom() != null ? configuration.getDefaultFrom() : "nobody@nowhere.org";
-
+        boolean sent = false;
+        var task = ctx.task();
         for (MailServerConfigurationType mailServerConfigurationType : configuration.getServer()) {
-
             OperationResult resultForServer = result.createSubresult(DOT_CLASS + "send.forServer");
             final String host = mailServerConfigurationType.getHost();
             resultForServer.addContext("server", host);
@@ -172,13 +186,12 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                         break;
                 }
             }
-            properties.put("mail.smtp.ssl.enable", "" + sslEnabled);
-            properties.put("mail.smtp.starttls.enable", "" + starttlsEnable);
-            properties.put("mail.smtp.starttls.required", "" + starttlsRequired);
+            properties.put("mail.smtp.ssl.enable", String.valueOf(sslEnabled));
+            properties.put("mail.smtp.starttls.enable", String.valueOf(starttlsEnable));
+            properties.put("mail.smtp.starttls.required", String.valueOf(starttlsRequired));
             if (Boolean.TRUE.equals(configuration.isDebug())) {
                 properties.put("mail.debug", "true");
             }
-
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("Using mail properties: ");
                 for (Object key : properties.keySet()) {
@@ -187,92 +200,15 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                     }
                 }
             }
-
             task.recordStateMessage("Sending notification mail via " + host);
-
             Session session = Session.getInstance(properties);
 
             try {
-                MimeMessage mimeMessage = new MimeMessage(session);
-                mimeMessage.setSentDate(new Date());
-                String from = mailMessage.getFrom() != null ? mailMessage.getFrom() : defaultFrom;
-                mimeMessage.setFrom(new InternetAddress(from));
-
-                for (String recipient : actualTo) {
-                    mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.TO, new InternetAddress(recipient));
-                }
-                for (String recipientCc : actualCc) {
-                    mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.CC, new InternetAddress(recipientCc));
-                }
-                for (String recipientBcc : actualBcc) {
-                    mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.BCC, new InternetAddress(recipientBcc));
-                }
-                mimeMessage.setSubject(mailMessage.getSubject(), StandardCharsets.UTF_8.name());
-                String contentType = mailMessage.getContentType();
-                if (StringUtils.isEmpty(contentType)) {
-                    contentType = "text/plain; charset=UTF-8";
-                }
-                BodyPart messageBody = new MimeBodyPart();
-                messageBody.setContent(mailMessage.getBody(), contentType);
-                Multipart multipart = new MimeMultipart();
-                multipart.addBodyPart(messageBody);
-                for (NotificationMessageAttachmentType attachment : mailMessage.getAttachments()) {
-
-                    if (attachment.getContent() != null || attachment.getContentFromFile() != null) {
-                        String fileName;
-                        BodyPart attachmentBody = new MimeBodyPart();
-                        if (attachment.getContent() != null) {
-                            try {
-                                Object content = RawType.getValue(attachment.getContent());
-                                if (content == null) {
-                                    LOGGER.warn("RawType " + attachment.getContent() + " isn't possible to parse.");
-                                    return;
-                                }
-                                attachmentBody.setContent(content, attachment.getContentType());
-                            } catch (SchemaException e) {
-                                LOGGER.warn("RawType " + attachment.getContent() + " isn't possible to parse.");
-                                return;
-                            }
-                            if (StringUtils.isBlank(attachment.getFileName())) {
-                                fileName = "attachment";
-                            } else {
-                                fileName = attachment.getFileName();
-                            }
-                        } else {
-                            if (!Files.isReadable(Paths.get(attachment.getContentFromFile()))) {
-                                LOGGER.warn("File " + attachment.getContentFromFile() + " non exist or isn't readable.");
-                                return;
-                            }
-
-                            DataSource source = new FileDataSource(attachment.getContentFromFile()) {
-                                @Override
-                                public String getContentType() {
-                                    return attachment.getContentType();
-                                }
-                            };
-                            attachmentBody.setDataHandler(new DataHandler(source));
-                            if (StringUtils.isBlank(attachment.getFileName())) {
-                                fileName = source.getName();
-                            } else {
-                                fileName = attachment.getFileName();
-                            }
-                        }
-
-                        if (!fileName.contains(".")) {
-                            fileName += MimeTypeUtil.getExtension(attachment.getContentType());
-                        }
-                        attachmentBody.setFileName(fileName);
-                        if (!StringUtils.isBlank(attachment.getContentId())) {
-                            attachmentBody.setHeader("Content-ID", attachment.getContentId());
-                        }
-
-                        multipart.addBodyPart(attachmentBody);
-                    } else {
-                        LOGGER.warn("NotificationMessageAttachmentType doesn't contain content.");
-                    }
+                MimeMessage mimeMessage = composeMimeMessage(session, mailMessage, actualTo, actualCc, actualBcc);
+                if (mimeMessage == null) {
+                    return;
                 }
 
-                mimeMessage.setContent(multipart);
                 try (jakarta.mail.Transport t = session.getTransport("smtp")) {
                     if (StringUtils.isNotEmpty(mailServerConfigurationType.getUsername())) {
                         ProtectedStringType passwordProtected = mailServerConfigurationType.getPassword();
@@ -298,8 +234,9 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                     long duration = System.currentTimeMillis() - start;
                     task.recordStateMessage("Notification mail sent successfully via " + host + ", in " + duration + " ms overall.");
                     task.recordNotificationOperation(name, true, duration);
+                    sent = true;
+                    break;
                 }
-                return;
             } catch (MessagingException e) {
                 String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", trying another mail server, if there is any";
                 LoggingUtils.logException(LOGGER, msg, e);
@@ -307,9 +244,89 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 task.recordStateMessage("Error sending notification mail via " + host);
             }
         }
-        LOGGER.warn("No more mail servers to try, mail notification to " + actualTo + " will not be sent.");
-        result.recordWarning("Mail notification to " + actualTo + " could not be sent.");
-        task.recordNotificationOperation(name, false, System.currentTimeMillis() - start);
+        if (!sent) {
+            LOGGER.warn("No more mail servers to try, mail notification to " + actualTo + " will not be sent.");
+            result.recordWarning("Mail notification to " + actualTo + " could not be sent.");
+            task.recordNotificationOperation(name, false, System.currentTimeMillis() - start);
+        }
+    }
+
+    private MimeMessage composeMimeMessage(Session session, Message mailMessage, Collection<String> actualTo, Collection<String> actualCc, Collection<String> actualBcc) throws MessagingException {
+        MimeMessage mimeMessage = new MimeMessage(session);
+        mimeMessage.setSentDate(new Date());
+        String defaultFrom = configuration.getDefaultFrom() != null ? configuration.getDefaultFrom() : "nobody@nowhere.org";
+        String from = mailMessage.getFrom() != null ? mailMessage.getFrom() : defaultFrom;
+        mimeMessage.setFrom(new InternetAddress(from));
+        for (String recipient : actualTo) {
+            mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.TO, new InternetAddress(recipient));
+        }
+        for (String recipientCc : actualCc) {
+            mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.CC, new InternetAddress(recipientCc));
+        }
+        for (String recipientBcc : actualBcc) {
+            mimeMessage.addRecipient(jakarta.mail.Message.RecipientType.BCC, new InternetAddress(recipientBcc));
+        }
+        mimeMessage.setSubject(mailMessage.getSubject(), StandardCharsets.UTF_8.name());
+        String contentType = mailMessage.getContentType();
+        if (StringUtils.isEmpty(contentType)) {
+            contentType = "text/plain; charset=UTF-8";
+        }
+        BodyPart messageBody = new MimeBodyPart();
+        messageBody.setContent(mailMessage.getBody(), contentType);
+        Multipart multipart = new MimeMultipart();
+        multipart.addBodyPart(messageBody);
+        for (NotificationMessageAttachmentType attachment : mailMessage.getAttachments()) {
+            if (attachment.getContent() != null || attachment.getContentFromFile() != null) {
+                String fileName;
+                BodyPart attachmentBody = new MimeBodyPart();
+                if (attachment.getContent() != null) {
+                    try {
+                        Object content = RawType.getValue(attachment.getContent());
+                        if (content == null) {
+                            throw new SchemaException();
+                        }
+                        attachmentBody.setContent(content, attachment.getContentType());
+                    } catch (SchemaException e) {
+                        LOGGER.warn("RawType " + attachment.getContent() + " isn't possible to parse.");
+                        return null;
+                    }
+                    if (StringUtils.isBlank(attachment.getFileName())) {
+                        fileName = "attachment";
+                    } else {
+                        fileName = attachment.getFileName();
+                    }
+                } else {
+                    if (!Files.isReadable(Paths.get(attachment.getContentFromFile()))) {
+                        LOGGER.warn("File " + attachment.getContentFromFile() + " non exist or isn't readable.");
+                        return null;
+                    }
+                    DataSource source = new FileDataSource(attachment.getContentFromFile()) {
+                        @Override
+                        public String getContentType() {
+                            return attachment.getContentType();
+                        }
+                    };
+                    attachmentBody.setDataHandler(new DataHandler(source));
+                    if (StringUtils.isBlank(attachment.getFileName())) {
+                        fileName = source.getName();
+                    } else {
+                        fileName = attachment.getFileName();
+                    }
+                }
+                if (!fileName.contains(".")) {
+                    fileName += MimeTypeUtil.getExtension(attachment.getContentType());
+                }
+                attachmentBody.setFileName(fileName);
+                if (!StringUtils.isBlank(attachment.getContentId())) {
+                    attachmentBody.setHeader("Content-ID", attachment.getContentId());
+                }
+                multipart.addBodyPart(attachmentBody);
+            } else {
+                LOGGER.warn("NotificationMessageAttachmentType doesn't contain content.");
+            }
+        }
+        mimeMessage.setContent(multipart);
+        return mimeMessage;
     }
 
     @Override
