@@ -169,26 +169,10 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             if (mailServerConfigurationType.getPort() != null) {
                 properties.setProperty("mail.smtp.port", String.valueOf(mailServerConfigurationType.getPort()));
             }
-            MailTransportSecurityType mailTransportSecurityType = mailServerConfigurationType.getTransportSecurity();
 
-            boolean sslEnabled = false, starttlsEnable = false, starttlsRequired = false;
-            if (mailTransportSecurityType != null) {
-                switch (mailTransportSecurityType) {
-                    case STARTTLS_ENABLED:
-                        starttlsEnable = true;
-                        break;
-                    case STARTTLS_REQUIRED:
-                        starttlsEnable = true;
-                        starttlsRequired = true;
-                        break;
-                    case SSL:
-                        sslEnabled = true;
-                        break;
-                }
-            }
-            properties.put("mail.smtp.ssl.enable", String.valueOf(sslEnabled));
-            properties.put("mail.smtp.starttls.enable", String.valueOf(starttlsEnable));
-            properties.put("mail.smtp.starttls.required", String.valueOf(starttlsRequired));
+            MailAuthenticationType auth = mailServerConfigurationType.getAuth();
+            boolean isBasicAuth = auth == null || auth.getBasic() != null;
+            defineTransportSecurity(mailServerConfigurationType, properties, isBasicAuth);
             if (Boolean.TRUE.equals(configuration.isDebug())) {
                 properties.put("mail.debug", "true");
             }
@@ -210,24 +194,13 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 }
 
                 try (jakarta.mail.Transport t = session.getTransport("smtp")) {
-                    if (StringUtils.isNotEmpty(mailServerConfigurationType.getUsername())) {
-                        ProtectedStringType passwordProtected = mailServerConfigurationType.getPassword();
-                        String password = null;
-                        if (passwordProtected != null) {
-                            try {
-                                password = transportSupport.protector().decryptString(passwordProtected);
-                            } catch (EncryptionException e) {
-                                String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the plaintext password value couldn't be obtained. Trying another mail server, if there is any.";
-                                LoggingUtils.logException(LOGGER, msg, e);
-                                resultForServer.recordFatalError(msg, e);
-                                continue;
-                            }
-                        }
-                        t.connect(mailServerConfigurationType.getUsername(), password);
+                    if (isBasicAuth) {
+                        if (!sendViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage))
+                            continue;
                     } else {
-                        t.connect();
+                        if (!sendViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage))
+                            continue;
                     }
-                    t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
                     LOGGER.debug("Message sent successfully to " + actualTo + " via server " + host + ".");
                     resultForServer.recordSuccess();
                     result.recordSuccess();
@@ -248,6 +221,84 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             LOGGER.warn("No more mail servers to try, mail notification to " + actualTo + " will not be sent.");
             result.recordWarning("Mail notification to " + actualTo + " could not be sent.");
             task.recordNotificationOperation(name, false, System.currentTimeMillis() - start);
+        }
+    }
+
+    private boolean sendViaOauth(Collection<String> actualTo, String host, MailAuthenticationType auth, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+        String clientId = auth.getOauth2().getClientId();
+        String clientSecret;
+        try {
+            clientSecret = transportSupport.protector().decryptString(auth.getOauth2().getClientSecret());
+        } catch (EncryptionException e) {
+        String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the client secret couldn't be obtained. Trying another mail server, if there is any.";
+        LoggingUtils.logException(LOGGER, msg, e);
+        resultForServer.recordFatalError(msg, e);
+        return false;
+    }
+        String tokenEndpoint = auth.getOauth2().getTokenEndpoint();
+
+        String accessToken = retrieveAccessToken(clientId, clientSecret, tokenEndpoint);
+
+        String userEmail = extractUserEmailFromMessage(mimeMessage);
+
+        t.connect(userEmail, generateXOAuth2Token(userEmail, accessToken));
+        t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
+        t.close();
+        return true;
+    }
+
+    private String generateXOAuth2Token(String username, String accessToken) {
+        return "user=" + username + "\001auth=Bearer " + accessToken + "\001\001";
+    }
+
+    private boolean sendViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+        if (StringUtils.isNotEmpty(mailServerConfigurationType.getUsername())) {
+            ProtectedStringType passwordProtected = mailServerConfigurationType.getPassword();
+            String password = null;
+            if (passwordProtected != null) {
+                try {
+                    password = transportSupport.protector().decryptString(passwordProtected);
+                } catch (EncryptionException e) {
+                    String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the plaintext password value couldn't be obtained. Trying another mail server, if there is any.";
+                    LoggingUtils.logException(LOGGER, msg, e);
+                    resultForServer.recordFatalError(msg, e);
+                    return false;
+                }
+            }
+            t.connect(mailServerConfigurationType.getUsername(), password);
+        } else {
+            t.connect();
+        }
+        t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
+        return true;
+    }
+
+    private void defineTransportSecurity(MailServerConfigurationType mailServerConfigurationType, Properties properties, boolean isBasicAuth) {
+        if (isBasicAuth) {
+            MailTransportSecurityType mailTransportSecurityType = mailServerConfigurationType.getTransportSecurity();
+
+            boolean sslEnabled = false, starttlsEnable = false, starttlsRequired = false;
+            if (mailTransportSecurityType != null) {
+                switch (mailTransportSecurityType) {
+                    case STARTTLS_ENABLED:
+                        starttlsEnable = true;
+                        break;
+                    case STARTTLS_REQUIRED:
+                        starttlsEnable = true;
+                        starttlsRequired = true;
+                        break;
+                    case SSL:
+                        sslEnabled = true;
+                        break;
+                }
+            }
+            properties.put("mail.smtp.ssl.enable", String.valueOf(sslEnabled));
+            properties.put("mail.smtp.starttls.enable", String.valueOf(starttlsEnable));
+            properties.put("mail.smtp.starttls.required", String.valueOf(starttlsRequired));
+        } else {
+            properties.put("mail.smtp.auth", "true");
+            properties.put("mail.smtp.auth.mechanisms", "XOAUTH2");
+            properties.put("mail.smtp.starttls.enable", "true");
         }
     }
 
