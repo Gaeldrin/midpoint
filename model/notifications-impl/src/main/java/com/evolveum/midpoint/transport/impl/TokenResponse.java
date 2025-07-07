@@ -1,10 +1,16 @@
 package com.evolveum.midpoint.transport.impl;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 public class TokenResponse {
-        private String tokenType;
-        private int expiresIn;
-        private int extExpiresIn;
-        private String accessToken;
+    @JsonProperty("token_type")
+    private String tokenType;
+    @JsonProperty("expires_in")
+    private int expiresIn;
+    @JsonProperty("ext_expires_in")
+    private int extExpiresIn;
+    @JsonProperty("access_token")
+    private String accessToken;
 
     public String getTokenType() {
         return tokenType;

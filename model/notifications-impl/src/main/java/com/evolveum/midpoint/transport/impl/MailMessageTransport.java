@@ -173,8 +173,11 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         for (MailServerConfigurationType mailServerConfigurationType : configuration.getServer()) {
             OperationResult resultForServer = result.createSubresult(DOT_CLASS + "send.forServer");
             final String host = mailServerConfigurationType.getHost();
+            MailAuthenticationType auth = mailServerConfigurationType.getAuth();
+            final boolean isBasicAuth = auth == null || auth.getBasic() != null;
             resultForServer.addContext("server", host);
             resultForServer.addContext("port", mailServerConfigurationType.getPort());
+            resultForServer.addContext("auth_type", isBasicAuth ? "basic" : "oauth2");
 
             Properties properties = System.getProperties();
             properties.setProperty("mail.smtp.host", host);
@@ -182,9 +185,8 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 properties.setProperty("mail.smtp.port", String.valueOf(mailServerConfigurationType.getPort()));
             }
 
-            MailAuthenticationType auth = mailServerConfigurationType.getAuth();
-            boolean isBasicAuth = auth == null || auth.getBasic() != null;
             defineTransportSecurity(mailServerConfigurationType, properties, isBasicAuth);
+
             if (Boolean.TRUE.equals(configuration.isDebug())) {
                 properties.put("mail.debug", "true");
             }
@@ -207,20 +209,23 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
 
                 try (jakarta.mail.Transport t = session.getTransport("smtp")) {
                     if (isBasicAuth) {
-                        if (!sendViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage)) {
-                            continue;
-                        }
+                        authenticateViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage);
                     } else {
-                        if (!sendViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage)) {continue;}
+                        authenticateViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage);
                     }
-                    LOGGER.debug("Message sent successfully to " + actualTo + " via server " + host + ".");
-                    resultForServer.recordSuccess();
-                    result.recordSuccess();
-                    long duration = System.currentTimeMillis() - start;
-                    task.recordStateMessage("Notification mail sent successfully via " + host + ", in " + duration + " ms overall.");
-                    task.recordNotificationOperation(name, true, duration);
-                    sent = true;
-                    break;
+
+                    if (t.isConnected()) {
+                        t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
+                        t.close();
+                        LOGGER.debug("Message sent successfully to " + actualTo + " via server " + host + ".");
+                        resultForServer.recordSuccess();
+                        result.recordSuccess();
+                        long duration = System.currentTimeMillis() - start;
+                        task.recordStateMessage("Notification mail sent successfully via " + host + ", in " + duration + " ms overall.");
+                        task.recordNotificationOperation(name, true, duration);
+                        sent = true;
+                        break;
+                    }
                 }
             } catch (MessagingException e) {
                 String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", trying another mail server, if there is any";
@@ -229,6 +234,7 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 task.recordStateMessage("Error sending notification mail via " + host);
             }
         }
+
         if (!sent) {
             LOGGER.warn("No more mail servers to try, mail notification to " + actualTo + " will not be sent.");
             result.recordWarning("Mail notification to " + actualTo + " could not be sent.");
@@ -236,43 +242,24 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
     }
 
-    private boolean sendViaOauth(Collection<String> actualTo, String host, MailAuthenticationType auth, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
-        // // Build a dynamic ClientRegistration from the auth (OAuth2CredentialsType) for this request
-        // ClientRegistration clientRegistration = ClientRegistration.withRegistrationId("mail-oauth2")
-        //         .clientId(auth.getOauth2().getClientId())
-        //         .clientSecret(auth.getOauth2().getClientSecret().getClearValue())
-        //         .tokenUri(auth.getOauth2().getTokenEndpoint())
-        //         .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
-        //         .build();
-        // ClientRegistrationRepository repo = new InMemoryClientRegistrationRepository(clientRegistration);
-        // OAuth2AuthorizedClientService service = new InMemoryOAuth2AuthorizedClientService(repo);
-        // OAuth2AuthorizedClientManager manager = new AuthorizedClientServiceOAuth2AuthorizedClientManager(repo, service);
-        // String registrationId = clientRegistration.getRegistrationId();
-        // String userEmail;
-        // try {
-        //     userEmail = extractUserEmailFromMessage(mimeMessage);
-        // } catch (Exception e) {
-        //     String msg = "Couldn't extract user email from message: " + e.getMessage();
-        //     LoggingUtils.logException(LOGGER, msg, e);
-        //     resultForServer.recordFatalError(msg, e);
-        //     return false;
-        // }
-        LOGGER.warn("peta id:");
-        LOGGER.warn(auth.getOauth2().getClientId());
-        ProtectedStringType passwordProtected = auth.getOauth2().getClientSecret();
-        String clientSecret = null;
-        if (passwordProtected != null) {
-            try {
-                clientSecret = transportSupport.protector().decryptString(passwordProtected);
-            } catch (EncryptionException e) {
-                String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the plaintext password value couldn't be obtained. Trying another mail server, if there is any.";
-                LoggingUtils.logException(LOGGER, msg, e);
-                resultForServer.recordFatalError(msg, e);
-                return false;
-            }
+    private void authenticateViaOauth(Collection<String> actualTo, String host, MailAuthenticationType auth, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+        ProtectedStringType clientSecretProtected = auth.getOauth2().getClientSecret();
+        if (clientSecretProtected == null) {
+            String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the client secret is not set. Trying another mail server, if there is any.";
+            LOGGER.warn(msg);
+            resultForServer.recordFatalError(msg);
+            return;
         }
-        LOGGER.warn("peta ids:");
-        LOGGER.warn(clientSecret);
+
+        String clientSecret = null;
+        try {
+            clientSecret = transportSupport.protector().decryptString(clientSecretProtected);
+        } catch (EncryptionException e) {
+            String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the plaintext client secret value couldn't be obtained. Trying another mail server, if there is any.";
+            LoggingUtils.logException(LOGGER, msg, e);
+            resultForServer.recordFatalError(msg, e);
+            return;
+        }
 
         String tokenResponse = MicrosoftTokenClient.getAccessToken(
             auth.getOauth2().getTokenEndpoint(),
@@ -280,52 +267,15 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                 clientSecret
         );
 
-        LOGGER.warn("peta token:");
-        LOGGER.warn(tokenResponse);
-        // String accessToken;
-        // try {
-        //     accessToken = retrieveAccessToken(manager, registrationId, userEmail);
-        // } catch (Exception e) {
-        //     String msg = "Couldn't retrieve access token for OAuth2: " + e.getMessage();
-        //     LoggingUtils.logException(LOGGER, msg, e);
-        //     resultForServer.recordFatalError(msg, e);
-        //     return false;
-        // }
         t.connect(host, auth.getOauth2().getUsername(), tokenResponse);
-        t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
-        t.close();
-        return true;
     }
 
-    // /**
-    //  * Retrieves an OAuth2 access token using a per-request OAuth2AuthorizedClientManager.
-    //  */
-    // private String retrieveAccessToken(OAuth2AuthorizedClientManager manager, String registrationId, String principalName) {
-    //     OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId(registrationId)
-    //             .principal(principalName)
-    //             .build();
-    //     OAuth2AuthorizedClient authorizedClient = manager.authorize(authorizeRequest);
-    //     if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
-    //         throw new IllegalStateException("Failed to authorize client or retrieve access token for registrationId: " + registrationId);
-    //     }
-    //     OAuth2AccessToken token = authorizedClient.getAccessToken();
-    //     return token.getTokenValue();
-    // }
+    private void authenticateViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+        BasicAuthenticationType basicAuth = mailServerConfigurationType.getAuth().getBasic();
+        String username = (basicAuth != null) ? basicAuth.getUsername() : mailServerConfigurationType.getUsername();
+        ProtectedStringType passwordProtected = (basicAuth != null) ? basicAuth.getPassword() : mailServerConfigurationType.getPassword();
 
-    // /**
-    //  * Extracts the user email from the MimeMessage's From header.
-    //  */
-    // private String extractUserEmailFromMessage(MimeMessage mimeMessage) throws MessagingException {
-    //     jakarta.mail.Address[] froms = mimeMessage.getFrom();
-    //     if (froms == null || froms.length == 0) {
-    //         throw new MessagingException("No From address in message");
-    //     }
-    //     return ((InternetAddress) froms[0]).getAddress();
-    // }
-
-    private boolean sendViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
-        if (StringUtils.isNotEmpty(mailServerConfigurationType.getUsername())) {
-            ProtectedStringType passwordProtected = mailServerConfigurationType.getPassword();
+        if (StringUtils.isNotEmpty(username)) {
             String password = null;
             if (passwordProtected != null) {
                 try {
@@ -334,15 +284,13 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                     String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the plaintext password value couldn't be obtained. Trying another mail server, if there is any.";
                     LoggingUtils.logException(LOGGER, msg, e);
                     resultForServer.recordFatalError(msg, e);
-                    return false;
+                    return;
                 }
             }
             t.connect(mailServerConfigurationType.getUsername(), password);
         } else {
             t.connect();
         }
-        t.sendMessage(mimeMessage, mimeMessage.getAllRecipients());
-        return true;
     }
 
     private void defineTransportSecurity(MailServerConfigurationType mailServerConfigurationType, Properties properties, boolean isBasicAuth) {

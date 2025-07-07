@@ -13,9 +13,8 @@ public class MicrosoftTokenClient {
 
         MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
         body.add("client_id", clientId);
-//        body.add("scope", "https://outlook.office.com/SMTP.Send");
-        body.add("scope", "https://outlook.office365.com/.default");
         body.add("client_secret", clientSecret);
+        body.add("scope", "https://outlook.office365.com/.default");
         body.add("grant_type", "client_credentials");
 
         HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
