@@ -553,6 +553,16 @@
             </xsd:appinfo>
         </xsd:annotation>
         <xsd:sequence>
+            <xsd:element name="username" type="xsd:string">
+                <xsd:annotation>
+                    <xsd:documentation>
+                        User on the authentication server.
+                    </xsd:documentation>
+                    <xsd:appinfo>
+                        <a:displayName>OAuth2CredentialsType.username</a:displayName>
+                    </xsd:appinfo>
+                </xsd:annotation>
+            </xsd:element>
             <xsd:element name="clientId" type="xsd:string">
                 <xsd:annotation>
                     <xsd:documentation>
@@ -570,16 +580,6 @@
                     </xsd:documentation>
                     <xsd:appinfo>
                         <a:displayName>OAuth2CredentialsType.clientSecret</a:displayName>
-                    </xsd:appinfo>
-                </xsd:annotation>
-            </xsd:element>
-            <xsd:element name="refreshToken" type="t:ProtectedStringType" minOccurs="0">
-                <xsd:annotation>
-                    <xsd:documentation>
-                        Optional token used for token renewal.
-                    </xsd:documentation>
-                    <xsd:appinfo>
-                        <a:displayName>OAuth2CredentialsType.refreshToken</a:displayName>
                     </xsd:appinfo>
                 </xsd:annotation>
             </xsd:element>
