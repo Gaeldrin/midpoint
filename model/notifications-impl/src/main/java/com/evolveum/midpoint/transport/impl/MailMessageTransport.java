@@ -42,6 +42,7 @@ import com.evolveum.midpoint.util.logging.TraceManager;
 import com.evolveum.midpoint.xml.ns._public.common.common_3.*;
 import com.evolveum.prism.xml.ns._public.types_3.ProtectedStringType;
 import com.evolveum.prism.xml.ns._public.types_3.RawType;
+import com.evolveum.midpoint.authentication.impl.OAuth2TokenRetrievalException;
 import com.evolveum.midpoint.authentication.impl.util.OAuth2TokenService;
 
 /**
@@ -82,16 +83,20 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             return;
         }
 
-        filterAndValidateRecipients(mailMessage, ctx, result);
+        filterAndSetRecipients(mailMessage, ctx, result);
 
-        if (checkRecipientsAndServers(mailMessage, result)) {
+        if (isRecipientsOrServersEmpty(mailMessage, result)) {
             return;
         }
 
         sendViaMailServers(mailMessage, ctx, result);
     }
 
-    private void filterAndValidateRecipients(Message mailMessage, SendingContext ctx, OperationResult result) {
+    /**
+     * Filters recipients using {@link TransportUtil#validateRecipient(List, List, List, GeneralTransportConfigurationType, Task, OperationResult, ExpressionFactory, ExpressionProfile, Trace)
+     * TransportUtil.validateRecipient()} and assigns them to the mailMessage parameter.
+     */
+    private void filterAndSetRecipients(Message mailMessage, SendingContext ctx, OperationResult result) {
         int optionsForFilteringRecipient = TransportUtil.optionsForFilteringRecipient(configuration);
         List<String> allowedRecipientTo = new ArrayList<>();
         List<String> forbiddenRecipientTo = new ArrayList<>();
@@ -126,7 +131,12 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
     }
 
-    private boolean checkRecipientsAndServers(Message mailMessage, OperationResult result) {
+    /**
+     * Validates presence of at least one recipient and mail server and logs whichever fails.
+     *
+     * @return true if any check fails, otherwise false
+     */
+    private boolean isRecipientsOrServersEmpty(Message mailMessage, OperationResult result) {
         int optionsForFilteringRecipient = TransportUtil.optionsForFilteringRecipient(configuration);
         if (optionsForFilteringRecipient != 0 && mailMessage.getTo().isEmpty()) {
             String msg = "No recipient found after recipient validation.";
@@ -152,6 +162,9 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         return false;
     }
 
+    /**
+     * Tries to compose the email and send it via each server configuration until first success.
+     */
     private void sendViaMailServers(Message mailMessage, SendingContext ctx, OperationResult result) {
         Collection<String> actualTo = filterBlankMailRecipients(mailMessage.getTo(), "to", mailMessage.getSubject());
         Collection<String> actualCc = filterBlankMailRecipients(mailMessage.getCc(), "cc", mailMessage.getSubject());
@@ -159,11 +172,12 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         long start = System.currentTimeMillis();
         boolean sent = false;
         var task = ctx.task();
+
         for (MailServerConfigurationType mailServerConfigurationType : configuration.getServer()) {
             OperationResult resultForServer = result.createSubresult(DOT_CLASS + "send.forServer");
             final String host = mailServerConfigurationType.getHost();
-            MailAuthenticationType auth = mailServerConfigurationType.getAuth();
-            final boolean isBasicAuth = auth == null || auth.getBasic() != null;
+            MailAuthenticationType mailAuthenticationType = mailServerConfigurationType.getAuth();
+            final boolean isBasicAuth = mailAuthenticationType == null || mailAuthenticationType.getBasic() != null;
             resultForServer.addContext("server", host);
             resultForServer.addContext("port", mailServerConfigurationType.getPort());
             resultForServer.addContext("auth_type", isBasicAuth ? "basic" : "oauth2");
@@ -198,9 +212,9 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
 
                 try (jakarta.mail.Transport t = session.getTransport("smtp")) {
                     if (isBasicAuth) {
-                        authenticateViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t, mimeMessage);
+                        authenticateViaBasicAuth(mailServerConfigurationType, actualTo, host, resultForServer, t);
                     } else {
-                        authenticateViaOauth(actualTo, host, auth, resultForServer, t, mimeMessage);
+                        authenticateViaOauth(mailAuthenticationType, actualTo, host, resultForServer, t);
                     }
 
                     if (t.isConnected()) {
@@ -217,7 +231,7 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
                     }
                 }
             } catch (MessagingException e) {
-                String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", trying another mail server, if there is any";
+                String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", trying another mail server, if there is any.";
                 LoggingUtils.logException(LOGGER, msg, e);
                 resultForServer.recordFatalError(msg, e);
                 task.recordStateMessage("Error sending notification mail via " + host);
@@ -231,16 +245,19 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
     }
 
-    private void authenticateViaOauth(Collection<String> actualTo, String host, MailAuthenticationType auth, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+    /**
+     * Either connects to the smtp server using the Oauth2 client credentials flow or logs reason for failure.
+     */
+    private void authenticateViaOauth(MailAuthenticationType auth, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t) throws MessagingException {
         ProtectedStringType clientSecretProtected = auth.getOauth2().getClientSecret();
         if (clientSecretProtected == null) {
             String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the client secret is not set. Trying another mail server, if there is any.";
-            LOGGER.warn(msg);
+            LOGGER.error(msg);
             resultForServer.recordFatalError(msg);
             return;
         }
 
-        String clientSecret = null;
+        String clientSecret;
         try {
             clientSecret = transportSupport.protector().decryptString(clientSecretProtected);
         } catch (EncryptionException e) {
@@ -251,19 +268,34 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
 
         LOGGER.debug(
-            "Attempting OAuth2 authentication for user: {}\nToken endpoint: {}",
-            auth.getOauth2().getUsername(),
-            auth.getOauth2().getTokenEndpoint()
+                "Attempting OAuth2 authentication for user {} on endpoint {}",
+                auth.getOauth2().getUsername(),
+                auth.getOauth2().getTokenEndpoint()
         );
 
-        String accessToken = OAuth2TokenService.getAccessToken(auth.getOauth2(), clientSecret);
+        String accessToken;
+        try {
+            accessToken = OAuth2TokenService.getAccessToken(auth.getOauth2(), clientSecret);
+        } catch (OAuth2TokenRetrievalException e) {
+            String msg = "Couldn't send mail message to " + actualTo + " via " + host + ", because the server didn't return the access token. Trying another mail server, if there is any.";
+            LOGGER.error(msg);
+            resultForServer.recordFatalError(msg, e);
+            return;
+        }
 
-        LOGGER.debug("OAuth2 authentication successful for user: {}", auth.getOauth2().getUsername());
+        LOGGER.debug(
+                "OAuth2 authentication successful for user {} on  endpoint {}",
+                auth.getOauth2().getUsername(),
+                auth.getOauth2().getTokenEndpoint()
+        );
 
         t.connect(host, auth.getOauth2().getUsername(), accessToken);
     }
 
-    private void authenticateViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
+    /**
+     * Either connects to the smtp server using the basic authentication or logs reason for failure.
+     */
+    private void authenticateViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t) throws MessagingException {
         BasicAuthenticationType basicAuth = mailServerConfigurationType.getAuth().getBasic();
         String username = (basicAuth != null) ? basicAuth.getUsername() : mailServerConfigurationType.getUsername();
         ProtectedStringType passwordProtected = (basicAuth != null) ? basicAuth.getPassword() : mailServerConfigurationType.getPassword();
@@ -286,6 +318,9 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
     }
 
+    /**
+     * Sets correct properties (http headers) for given authentication type.
+     */
     private void defineTransportSecurity(MailServerConfigurationType mailServerConfigurationType, Properties properties, boolean isBasicAuth) {
         if (isBasicAuth) {
             MailTransportSecurityType mailTransportSecurityType = mailServerConfigurationType.getTransportSecurity();
@@ -315,6 +350,11 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
         }
     }
 
+    /**
+     * Either creates MimeMessage or logs reason for failure.
+     *
+     * @return null if an expected error occurs, MimeMessage otherwise
+     */
     private MimeMessage composeMimeMessage(Session session, Message mailMessage, Collection<String> actualTo, Collection<String> actualCc, Collection<String> actualBcc) throws MessagingException {
         MimeMessage mimeMessage = new MimeMessage(session);
         mimeMessage.setSentDate(new Date());

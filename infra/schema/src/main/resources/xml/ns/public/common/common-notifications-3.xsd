@@ -593,6 +593,16 @@
                     </xsd:appinfo>
                 </xsd:annotation>
             </xsd:element>
+            <xsd:element name="scope" type="xsd:string">
+                <xsd:annotation>
+                    <xsd:documentation>
+                        Scope to be requested, for example "https://outlook.office365.com/.default" for o365.
+                    </xsd:documentation>
+                    <xsd:appinfo>
+                        <a:displayName>OAuth2CredentialsType.scope</a:displayName>
+                    </xsd:appinfo>
+                </xsd:annotation>
+            </xsd:element>
         </xsd:sequence>
     </xsd:complexType>
 

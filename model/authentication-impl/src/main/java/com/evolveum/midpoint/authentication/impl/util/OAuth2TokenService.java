@@ -1,5 +1,6 @@
 package com.evolveum.midpoint.authentication.impl.util;
 
+import com.evolveum.midpoint.authentication.impl.OAuth2TokenRetrievalException;
 import com.evolveum.midpoint.xml.ns._public.common.common_3.OAuth2CredentialsType;
 import org.springframework.security.oauth2.client.AuthorizedClientServiceOAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
@@ -18,31 +19,27 @@ public class OAuth2TokenService {
 
     /**
      * Retrieves an OAuth2 access token using client credentials flow.
-     * Uses Spring Security's OAuth2 client infrastructure.
      */
-    public static String getAccessToken(OAuth2CredentialsType oauth2Credentials, String clientSecret) {
-        // Create a ClientRegistration for this specific request
+    public static String getAccessToken(OAuth2CredentialsType oauth2Credentials, String clientSecret) throws OAuth2TokenRetrievalException {
         ClientRegistration clientRegistration = ClientRegistration.withRegistrationId("mail-oauth2")
                 .clientId(oauth2Credentials.getClientId())
                 .clientSecret(clientSecret)
                 .tokenUri(oauth2Credentials.getTokenEndpoint())
                 .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
-                .scope("https://outlook.office365.com/.default")
+                .scope(oauth2Credentials.getScope())
                 .build();
 
-        // Create a temporary repository and manager for this request
         InMemoryClientRegistrationRepository repo = new InMemoryClientRegistrationRepository(clientRegistration);
         OAuth2AuthorizedClientService service = new InMemoryOAuth2AuthorizedClientService(repo);
         OAuth2AuthorizedClientManager manager = new AuthorizedClientServiceOAuth2AuthorizedClientManager(repo, service);
 
-        // Request the access token
         OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId("mail-oauth2")
                 .principal(oauth2Credentials.getUsername())
                 .build();
 
         OAuth2AuthorizedClient authorizedClient = manager.authorize(authorizeRequest);
         if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
-            throw new IllegalStateException("Failed to authorize client or retrieve access token");
+            throw new OAuth2TokenRetrievalException("Failed to authorize client or retrieve access token");
         }
 
         return authorizedClient.getAccessToken().getTokenValue();
