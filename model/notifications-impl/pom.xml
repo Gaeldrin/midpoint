@@ -67,6 +67,11 @@
         </dependency>
         <dependency>
             <groupId>com.evolveum.midpoint.model</groupId>
+            <artifactId>authentication-impl</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.evolveum.midpoint.model</groupId>
             <artifactId>cases-api</artifactId>
             <version>${project.version}</version>
         </dependency>
@@ -133,14 +138,6 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
-        </dependency>
-        <dependency>
-           <groupId>org.springframework.security</groupId>
-           <artifactId>spring-security-oauth2-client</artifactId>
-        </dependency>
-        <dependency>
-           <groupId>org.springframework.security</groupId>
-           <artifactId>spring-security-oauth2-core</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>

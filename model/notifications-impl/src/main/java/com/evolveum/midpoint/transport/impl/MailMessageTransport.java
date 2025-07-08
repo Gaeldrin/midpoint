@@ -255,11 +255,11 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             auth.getOauth2().getUsername(),
             auth.getOauth2().getTokenEndpoint()
         );
-        
-        String accessToken = OAuth2TokenService.getAccessToken(auth.getOauth2());
+
+        String accessToken = OAuth2TokenService.getAccessToken(auth.getOauth2(), clientSecret);
 
         LOGGER.debug("OAuth2 authentication successful for user: {}", auth.getOauth2().getUsername());
-   
+
         t.connect(host, auth.getOauth2().getUsername(), accessToken);
     }
 

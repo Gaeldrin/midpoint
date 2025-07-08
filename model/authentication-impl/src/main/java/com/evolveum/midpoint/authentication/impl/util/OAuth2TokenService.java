@@ -20,11 +20,11 @@ public class OAuth2TokenService {
      * Retrieves an OAuth2 access token using client credentials flow.
      * Uses Spring Security's OAuth2 client infrastructure.
      */
-    public static String getAccessToken(OAuth2CredentialsType oauth2Credentials) {
+    public static String getAccessToken(OAuth2CredentialsType oauth2Credentials, String clientSecret) {
         // Create a ClientRegistration for this specific request
         ClientRegistration clientRegistration = ClientRegistration.withRegistrationId("mail-oauth2")
                 .clientId(oauth2Credentials.getClientId())
-                .clientSecret(oauth2Credentials.getClientSecret().getClearValue())
+                .clientSecret(clientSecret)
                 .tokenUri(oauth2Credentials.getTokenEndpoint())
                 .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
                 .scope("https://outlook.office365.com/.default")
@@ -39,12 +39,12 @@ public class OAuth2TokenService {
         OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId("mail-oauth2")
                 .principal(oauth2Credentials.getUsername())
                 .build();
-        
+
         OAuth2AuthorizedClient authorizedClient = manager.authorize(authorizeRequest);
         if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
             throw new IllegalStateException("Failed to authorize client or retrieve access token");
         }
-        
+
         return authorizedClient.getAccessToken().getTokenValue();
     }
 }
