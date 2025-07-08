@@ -43,17 +43,16 @@ import com.evolveum.midpoint.xml.ns._public.common.common_3.*;
 import com.evolveum.prism.xml.ns._public.types_3.ProtectedStringType;
 import com.evolveum.prism.xml.ns._public.types_3.RawType;
 
-//import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
-//import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
-//import org.springframework.security.oauth2.client.OAuth2AuthorizeRequest;
-//import org.springframework.security.oauth2.client.registration.ClientRegistration;
-//import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
-//import org.springframework.security.oauth2.client.registration.InMemoryClientRegistrationRepository;
-//import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
-//import org.springframework.security.oauth2.client.AuthorizedClientServiceOAuth2AuthorizedClientManager;
-//import org.springframework.security.oauth2.core.AuthorizationGrantType;
-//import org.springframework.security.oauth2.core.OAuth2AccessToken;
-//import org.springframework.security.oauth2.client.InMemoryOAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.AuthorizedClientServiceOAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizeRequest;
+import org.springframework.security.oauth2.client.registration.ClientRegistration;
+import org.springframework.security.oauth2.client.registration.InMemoryClientRegistrationRepository;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.InMemoryOAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.OAuth2AccessToken;
 
 /**
  * Message transport sending mail messages.
@@ -261,13 +260,53 @@ public class MailMessageTransport implements Transport<MailTransportConfiguratio
             return;
         }
 
-        String tokenResponse = MicrosoftTokenClient.getAccessToken(
+        LOGGER.debug(
+            "Attempting OAuth2 authentication for user: {}\nToken endpoint: {}",
+            auth.getOauth2().getUsername(),
+            auth.getOauth2().getTokenEndpoint()
+        );
+        
+        String accessToken = retrieveAccessTokenUsingSpringOAuth2(
             auth.getOauth2().getTokenEndpoint(),
             auth.getOauth2().getClientId(),
-                clientSecret
+            clientSecret,
+            auth.getOauth2().getUsername()
         );
 
-        t.connect(host, auth.getOauth2().getUsername(), tokenResponse);
+        LOGGER.debug("OAuth2 authentication successful for user: {}", auth.getOauth2().getUsername());
+   
+        t.connect(host, auth.getOauth2().getUsername(), accessToken);
+    }
+
+    /**
+     * Retrieves an OAuth2 access token using Spring Security's OAuth2 client infrastructure.
+     */
+    private String retrieveAccessTokenUsingSpringOAuth2(String tokenEndpoint, String clientId, String clientSecret, String principalName) {
+        // Create a ClientRegistration for this specific request
+        ClientRegistration clientRegistration = ClientRegistration.withRegistrationId("mail-oauth2")
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .tokenUri(tokenEndpoint)
+                .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                .scope("https://outlook.office365.com/.default")
+                .build();
+
+        // Create a temporary repository and manager for this request
+        InMemoryClientRegistrationRepository repo = new InMemoryClientRegistrationRepository(clientRegistration);
+        OAuth2AuthorizedClientService service = new InMemoryOAuth2AuthorizedClientService(repo);
+        OAuth2AuthorizedClientManager manager = new AuthorizedClientServiceOAuth2AuthorizedClientManager(repo, service);
+
+        // Request the access token
+        OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId("mail-oauth2")
+                .principal(principalName)
+                .build();
+        
+        OAuth2AuthorizedClient authorizedClient = manager.authorize(authorizeRequest);
+        if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
+            throw new IllegalStateException("Failed to authorize client or retrieve access token");
+        }
+        
+        return authorizedClient.getAccessToken().getTokenValue();
     }
 
     private void authenticateViaBasicAuth(MailServerConfigurationType mailServerConfigurationType, Collection<String> actualTo, String host, OperationResult resultForServer, jakarta.mail.Transport t, MimeMessage mimeMessage) throws MessagingException {
