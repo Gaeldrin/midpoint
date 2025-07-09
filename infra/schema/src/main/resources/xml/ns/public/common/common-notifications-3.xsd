@@ -547,6 +547,8 @@
         <xsd:annotation>
             <xsd:documentation>
                 Configuration of OAuth 2.0 authentication.
+
+                EXPERIMENTAL, tested for O365.
             </xsd:documentation>
             <xsd:appinfo>
                 <a:displayName>OAuth2CredentialsType.details</a:displayName>
