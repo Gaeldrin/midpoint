@@ -2473,7 +2473,7 @@
                     <xsd:element name="server" type="tns:MailServerConfigurationType" minOccurs="0" maxOccurs="unbounded">
                         <xsd:annotation>
                             <xsd:documentation>
-                                Configuration of a particular mail server host. If there are more of them, they are tried
+                                Configuration of a particular smtp server host. If there are more of them, they are tried
                                 one after another. If there is none, mail messages are not sent.
                             </xsd:documentation>
                             <xsd:appinfo>
